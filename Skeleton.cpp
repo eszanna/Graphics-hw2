@@ -33,7 +33,7 @@ const char* vertexSource = R"(
 
 	void main() {
 		color = vertexColor;														// copy color from input to output
-		gl_Position = vec4(vertexPosition.x, vertexPosition.y, 0, 1) * MVP; 		// transform to clipping space
+		gl_Position =  vec4(vertexPosition.x, vertexPosition.y, 0, 1) * MVP; 		// transform to clipping space
 	}
 )";
 
@@ -49,12 +49,13 @@ const char* fragmentSource = R"(
 		fragmentColor = vec4(color, 1); // extend RGB to RGBA
 	}
 )";
+
 //this class is 90% from the "Triangle with smooth color and interactive polyline"
 class Camera {
 	vec2 wCenter; // center in world coordinates
 	vec2 wSize;   // width and height in world coordinates
 public:
-	Camera() : wCenter(0, 0), wSize(600, 600) { }
+	Camera() : wCenter(0, 0), wSize(30, 30) { }
 
 	mat4 V() { return TranslateMatrix(-wCenter); }
 	mat4 P() { return ScaleMatrix(vec2(2 / wSize.x, 2 / wSize.y)); }
@@ -112,16 +113,131 @@ public:
 		// input pipeline
 		vec4 mVertex = vec4(cX, cY, 0, 1) * camera.Pinv() * camera.Vinv() * Minv();
 		controlPoints.push_back(vec3(mVertex.x, mVertex.y, 0.0f));
-		// fill interleaved data
-		vertexData.push_back(mVertex.x);
-		vertexData.push_back(mVertex.y);
-		vertexData.push_back(1); // red
-		vertexData.push_back(0); // green
-		vertexData.push_back(0); // blue
 	}
 
 	virtual vec3 r(float t) = 0; //pure virtual, the approximations must calculate it themselves
 
+	
+
+	void Clear() {
+		controlPoints.clear();
+		ts.clear();
+	}
+
+	int ClosestIndex(float cX, float cY) {
+		//find the closest point to the clicked location
+		float threshold = 0.1f; // this can be adjusted
+		int closestPointIndex = -1;
+		vec4 mVertex = vec4(cX, cY, 0, 1) * camera.Pinv() * camera.Vinv() * Minv();
+		for (unsigned int i = 0; i < controlPoints.size(); i++) {
+			if (fabs(controlPoints[i].x - mVertex.x) < threshold && fabs(controlPoints[i].y - mVertex.y) < threshold)
+				closestPointIndex = i;
+		}
+		if (closestPointIndex != -1) {
+			return closestPointIndex;
+		}
+		else 
+		{
+			return -1;
+		}
+	}
+
+	void UpdatePoint(float cX, float cY, int index) {
+		vec4 mVertex = vec4(cX, cY, 0, 1) * camera.Pinv() * camera.Vinv() * Minv();
+		controlPoints[index] = vec3(mVertex.x, mVertex.y, 0.0f);
+	}
+};
+
+//this algorithm is from the ppt 
+class Lagrange : public Curve {
+public:
+
+	float L(int i, float t) {
+		float Li = 1.0f;
+		for (unsigned int j = 0; j < controlPoints.size(); j++) {
+			if (j != i)
+				Li *= (t - ts[j]) / (ts[i] - ts[j]);
+		}
+		return Li;
+	}
+
+	void AddPoint(float cX, float cY) override {
+		Curve::AddPoint(cX, cY);
+		float ti = (float)(ts.size() + 1) / (ts.size()+2);
+		printf("%f",ti);
+		ts.push_back(ti);
+	}
+
+	vec3 r(float t) {
+		vec3 rt(0, 0, 0);
+		for (unsigned int i = 0; i < controlPoints.size(); i++) {
+			rt = rt + controlPoints[i] * L(i, t);
+		}
+		return rt;
+	}
+	void Draw() {
+		if (controlPoints.size() > 0) {
+			vertexData.clear();
+			// generate the curve points
+			int numSections = 100;
+			for (unsigned int i = 0; i < controlPoints.size() - 1; i++) {
+				for (unsigned int j = 0; j <= numSections; j++) {
+					float t = ts[i] + (ts[i + 1] - ts[i]) * ((float)j / numSections);
+					vec3 point = r(t);
+					vertexData.push_back(point.x);
+					vertexData.push_back(point.y);
+					vertexData.push_back(1); // red
+					vertexData.push_back(1); // green
+					vertexData.push_back(0); // blue
+				}
+			}
+
+			// add control points to vertex data
+			for (auto& point : controlPoints) {
+				vertexData.push_back(point.x);
+				vertexData.push_back(point.y);
+				vertexData.push_back(1); // red
+				vertexData.push_back(0); // green
+				vertexData.push_back(0); // blue
+			}
+			// copy data to the GPU
+			glBindBuffer(GL_ARRAY_BUFFER, vbo);
+			glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(float), &vertexData[0], GL_DYNAMIC_DRAW);
+
+			// set GPU uniform matrix variable MVP with the content of CPU variable MVPTransform
+			mat4 MVPTransform = M() * camera.V() * camera.P();
+			gpuProgram.setUniform(MVPTransform, "MVP");
+
+			// draw the curve
+			glBindVertexArray(vao);
+			glLineWidth(2.0f);
+			glDrawArrays(GL_LINE_STRIP, 0, (controlPoints.size() - 1) * (numSections + 1));
+
+			// draw the control points
+			glPointSize(10.0f);
+			glDrawArrays(GL_POINTS, (controlPoints.size() - 1) * (numSections + 1), controlPoints.size());
+		}
+	}
+	
+};
+
+//this algorithm is from the ppt 
+class Bezier : public Curve {
+public:
+	float B(int i, float t) {
+		int n = controlPoints.size() - 1; // n+1 pts!
+		float choose = 1;
+		for (unsigned int j = 1; j <= i; j++) choose *= (float)(n - j + 1) / j;
+		return choose * pow(t, i) * pow(1 - t, n - i);
+	}
+public:
+
+	vec3 r(float t) override {
+		vec3 rt(0, 0, 0);
+		for (unsigned int i = 0; i < controlPoints.size(); i++)
+			rt = rt + controlPoints[i] * B(i, t);
+		return rt;
+	}
 	void Draw() {
 		if (controlPoints.size() >= 0) {
 			vertexData.clear();
@@ -165,113 +281,31 @@ public:
 			glDrawArrays(GL_POINTS, numSections + 1, controlPoints.size());
 		}
 	}
-	void Clear() {
-		controlPoints.clear();
-		ts.clear();
-	}
-
-	int ClosestIndex(float cX, float cY) {
-		//find the closest point to the clicked location
-		float threshold = 10.0f; // this can be adjusted
-		int closestPointIndex = -1;
-
-		//because the points are recalculated 
-		vec4 mVertex = vec4(cX, cY, 0, 1) * camera.Pinv() * camera.Vinv() * Minv();
-
-		for (unsigned int i = 0; i < controlPoints.size(); i++) {
-
-			if (fabs(controlPoints[i].x - mVertex.x) < threshold && fabs(controlPoints[i].y - mVertex.y) < threshold)
-				closestPointIndex = i;
-		}
-		if (closestPointIndex != -1) {
-			return closestPointIndex;
-		}
-	}
-
-	void UpdatePoint(float cX, float cY, int index) {
-		vec4 mVertex = vec4(cX, cY, 0, 1) * camera.Pinv() * camera.Vinv() * Minv();
-		controlPoints[index] = vec3(mVertex.x, mVertex.y, 0.0f);
-	}
-};
-
-//this algorithm is from the ppt 
-class Lagrange : public Curve {
-public:
-
-	float L(int i, float t) {
-		float Li = 1.0f;
-		for (unsigned int j = 0; j < controlPoints.size(); j++) {
-			if (j != i)
-				Li *= (t - ts[j]) / (ts[i] - ts[j]);
-		}
-		return Li;
-	}
-public:
-	void AddPoint(float cX, float cY) override {
-		Curve::AddPoint(cX, cY);
-		float ti = (float)controlPoints.size() / (controlPoints.size() + 1); // normalize ti
-		ts.push_back(ti);
-	}
-
-	vec3 r(float t) {
-		vec3 rt(0, 0, 0);
-		for (unsigned int i = 0; i < controlPoints.size(); i++)
-			rt = rt + controlPoints[i] * L(i, t);
-		return rt;
-	}
-	void Draw() {
-		Curve::Draw();
-	}
-};
-
-//this algorithm is from the ppt 
-class Bezier : public Curve {
-public:
-	float B(int i, float t) {
-		int n = controlPoints.size() - 1; // n+1 pts!
-		float choose = 1;
-		for (unsigned int j = 1; j <= i; j++) choose *= (float)(n - j + 1) / j;
-		return choose * pow(t, i) * pow(1 - t, n - i);
-	}
-public:
-
-	vec3 r(float t) override {
-		vec3 rt(0, 0, 0);
-		for (unsigned int i = 0; i < controlPoints.size(); i++)
-			rt = rt + controlPoints[i] * B(i, t);
-		return rt;
-	}
-
 };
 
 //this algorithm is from the ppt, and the Hermite is from the internet
 class CatmullRom : public Curve {
 
 public:
-
 	float tension = 0.0f; // parameterization factor
 
 	vec3 Hermite(vec3 p0, vec3 v0, float t0, vec3 p1, vec3 v1, float t1, float t) {
-		float s = (t - t0) / (t1 - t0);
-		vec3 h00 = (2 * pow(s, 3) - 3 * pow(s, 2) + 1) * p0;
-		vec3 h10 = (pow(s, 3) - 2 * pow(s, 2) + s) * v0;
-		vec3 h01 = (-2 * pow(s, 3) + 3 * pow(s, 2)) * p1;
-		vec3 h11 = (pow(s, 3) - pow(s, 2)) * v1;
-		return h00 + h10 + h01 + h11;
+		vec3 a0 = p0;
+		vec3 a1 = v0;
+		vec3 a2 = 3 * (p1 - p0) / pow((t1 - t0), 2) - (v1 + 2 * v0) / (t1 - t0);
+		vec3 a3 = 2 * (p0 - p1) / pow((t1 - t0), 3) + (v1 + v0) / pow((t1 - t0), 2);
+		return a0 + a1 * (t-t0) + a2 * pow((t - t0), 2) + a3 * pow((t - t0), 3);
 	}
-
 
 	vec3 r(float t) {
 		for (int i = 0; i < controlPoints.size() - 1; i++) {
 			if (ts[i] <= t && t <= ts[i + 1]) {
-				vec3 v0 = (controlPoints[i + 1] - controlPoints[i]) / (ts[i + 1] - ts[i]);
-				vec3 v1;
-				if (i + 2 < controlPoints.size()) {
-					v1 = (controlPoints[i + 2] - controlPoints[i + 1]) / (ts[i + 2] - ts[i + 1]);
-				}
-				else {
-					v1 = (controlPoints[i + 1] - controlPoints[i]) / (ts[i + 1] - ts[i]);
-				}
+				vec3 v1; vec3 v0;
+				if (i > 0)
+					v0 = (1.0f - tension) * 0.5f * ((controlPoints[i + 1] - controlPoints[i]) / (ts[i + 1] - ts[i]) + (controlPoints[i] - controlPoints[i - 1]) / (ts[i] - ts[i - 1]));
+				if (i < controlPoints.size() - 2) 
+					v1 = (1.0f - tension) * 0.5f * ((controlPoints[i + 2] - controlPoints[i+1 ]) / (ts[i +2] - ts[i+1]) + (controlPoints[i+1] - controlPoints[i]) / (ts[i +1] - ts[i ]));
+				
 				return Hermite(controlPoints[i], v0, ts[i], controlPoints[i + 1], v1, ts[i + 1], t);
 			}
 		}
@@ -284,17 +318,23 @@ public:
 			//the first control point
 			ts.push_back(0);
 		}
-		else if (controlPoints.size() <= 4) {
-			//for the second, third and fourth control points we will use the increments
-			ts.push_back(ts.back() + 1);
-		}
+
 		else {
 			//for the rest of the control points, calculate the parameter value based on the distance to the previous point
 			vec3 diff = controlPoints.back() - controlPoints[controlPoints.size() - 2];
 			float dist = sqrt(diff.x * diff.x + diff.y * diff.y);
-			ts.push_back(ts.back() + pow(dist, tension));
+			ts.push_back(pow(dist, tension) + ts.back());
 		}
 	}
+	void NormalizeKnots() {
+		if (!ts.empty()) {
+			float maxT = ts.back();
+			for (float& t : ts) {
+				t /= maxT;
+			}
+		}
+	}
+
 	//this spline draws itself a bit differently 
 	void Draw() {
 		if (controlPoints.size() > 0) {
@@ -304,6 +344,7 @@ public:
 			for (unsigned int i = 0; i < controlPoints.size() - 1; i++) {
 				for (unsigned int j = 0; j <= numSections; j++) {
 					float t = ts[i] + (ts[i + 1] - ts[i]) * ((float)j / numSections);
+					
 					vec3 point = r(t);
 					vertexData.push_back(point.x);
 					vertexData.push_back(point.y);
@@ -321,7 +362,6 @@ public:
 				vertexData.push_back(0); // green
 				vertexData.push_back(0); // blue
 			}
-
 			// copy data to the GPU
 			glBindBuffer(GL_ARRAY_BUFFER, vbo);
 			glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(float), &vertexData[0], GL_DYNAMIC_DRAW);
@@ -343,7 +383,6 @@ public:
 	void Recalculate() {
 		//clear the ts vector
 		ts.clear();
-
 		//recalculate the knots
 		if (controlPoints.size() > 0) {
 			ts.push_back(0);
@@ -353,7 +392,6 @@ public:
 				ts.push_back(ts.back() + pow(dist, tension));
 			}
 		}
-
 		//redraw the curve
 		Draw();
 	}
@@ -365,7 +403,6 @@ public:
 	}
 };
 
-
 enum CurveType { NONE, BEZIER, LAGRANGE, CATMULLROM };
 CurveType currentCurve = NONE;
 
@@ -373,10 +410,9 @@ Bezier bezier;
 Lagrange lagrange;
 CatmullRom catmullrom;
 
-
 // Initialization, create an OpenGL context
 void onInitialization() {
-	glViewport(0, 0, windowWidth, windowHeight); 	// Position and size of the photograph on screen
+	glViewport(0, 0, 600, 600); 	// Position and size of the photograph on screen
 	glLineWidth(2.0f); // Width of lines in pixels
 
 	// Create objects by setting up their vertex data on the GPU
@@ -398,7 +434,6 @@ void onInitialization() {
 	printf("Key 'c': Draw CatmullRom spline\n");
 	printf("Key 'T': CatmullRom spline tension increase by 0.1\n");
 	printf("Key 't': CatmullRom spline tension decrease by 0.1\n");
-
 }
 
 // Window has become invalid: Redraw
@@ -406,44 +441,47 @@ void onDisplay() {
 	glClearColor(0, 0, 0, 0);							// background color 
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); // clear the screen
 
-
 	switch (currentCurve) {
-		case BEZIER: bezier.Draw(); break;
-		case LAGRANGE: lagrange.Draw(); break;
-		case CATMULLROM: catmullrom.Draw(); break;
-		case NONE: break;
+	case BEZIER: bezier.Draw(); break;
+	case LAGRANGE: lagrange.Draw(); break;
+	case CATMULLROM: catmullrom.Draw(); break;
+	case NONE: break;
 	}
-
 	glutSwapBuffers();									// exchange the two buffers
 }
 
 // Key of ASCII code pressed
 void onKeyboard(unsigned char key, int pX, int pY) {
 	switch (key) {
-	case 'P': camera.Pan(vec2(-1, 0)); break;
-	case 'p': camera.Pan(vec2(+1, 0)); break;
+	case 'p': camera.Pan(vec2(-1, 0)); printf("Camera moved to the left 1 meter\n"); break;
+	case 'P': camera.Pan(vec2(+1, 0)); printf("Camera moved to the right 1 meter\n"); break;
 
-	case 'Z': camera.Zoom(0.9f); break;
-	case 'z': camera.Zoom(1.1f); break;
+	case 'Z': camera.Zoom(1.1f); printf("Zoomed out\n"); break;
+	case 'z': camera.Zoom(1/1.1); printf("Zoomed in\n"); break;
 
 	case 'b': currentCurve = BEZIER;
+		printf("Begin drawing Bezier\n");
 		lagrange.Clear();
 		catmullrom.Clear();
 		break;
 	case 'l': currentCurve = LAGRANGE;
+		printf("Begin drawing Lagrange\n");
 		bezier.Clear();
 		catmullrom.Clear();
 		break;
 	case 'c': currentCurve = CATMULLROM;
+		printf("Begin drawing Catmull-Rom\n");
 		lagrange.Clear();
 		bezier.Clear();
 		break;
 
 	case 'T': catmullrom.tension += 0.1f;
 		catmullrom.Recalculate();
+		printf("Tension increased by 0.1\n");
 		break;
 	case 't': catmullrom.tension -= 0.1f;
 		catmullrom.Recalculate();
+		printf("Tension decreased by 0.1\n");
 		break;
 	}
 	glutPostRedisplay();
@@ -457,19 +495,18 @@ void onKeyboardUp(unsigned char key, int pX, int pY) {
 void onMouse(int button, int state, int pX, int pY) {
 	float cX = 2.0f * pX / windowWidth - 1;	// flip y axis
 	float cY = 1.0f - 2.0f * pY / windowHeight;
-	
+
 	if (button == GLUT_LEFT_BUTTON && state == GLUT_DOWN) {  // GLUT_LEFT_BUTTON / GLUT_RIGHT_BUTTON and GLUT_DOWN / GLUT_UP
 
 		switch (currentCurve) {
-		case BEZIER: bezier.AddPoint(cX, cY);  break;
-		case LAGRANGE: lagrange.AddPoint(cX, cY);  break;
-		case CATMULLROM: catmullrom.AddPoint(cX, cY);  break;
+		case BEZIER: bezier.AddPoint(cX, cY);  printf("Point added at: %f, %f\n", cX, cY);  break;
+		case LAGRANGE: lagrange.AddPoint(cX, cY);  printf("Point added at: %f, %f\n", cX, cY);  break;
+		case CATMULLROM: catmullrom.AddPoint(cX, cY);   printf("Point added at: %f, %f\n", cX, cY); break;
 		case NONE: break;
 		}
-
 	}
 	else if (button == GLUT_RIGHT_BUTTON && state == GLUT_DOWN) {
-		
+
 		switch (currentCurve) {
 		case BEZIER: bezier.selectedPointIndex = bezier.ClosestIndex(cX, cY);   break;
 		case LAGRANGE: lagrange.selectedPointIndex = lagrange.ClosestIndex(cX, cY);  break;
@@ -477,8 +514,14 @@ void onMouse(int button, int state, int pX, int pY) {
 		case NONE: break;
 		}
 	}
-
-
+	else if (state == GLUT_UP) {
+		switch (currentCurve) {
+		case BEZIER: bezier.selectedPointIndex = -1;   break;
+		case LAGRANGE: lagrange.selectedPointIndex = -1;  break;
+		case CATMULLROM: catmullrom.selectedPointIndex = -1;  break;
+		case NONE: break;
+		}
+	}
 	glutPostRedisplay();     // redraw
 }
 
@@ -488,18 +531,15 @@ void onMouseMotion(int pX, int pY) {
 	float cX = 2.0f * pX / windowWidth - 1;	// flip y axis
 	float cY = 1.0f - 2.0f * pY / windowHeight;
 	switch (currentCurve) {
-	case BEZIER: bezier.UpdatePoint(cX, cY, bezier.selectedPointIndex);  break;
-	case LAGRANGE: lagrange.UpdatePoint(cX, cY, lagrange.selectedPointIndex); break;
-	case CATMULLROM: catmullrom.UpdatePoint(cX, cY, catmullrom.selectedPointIndex); break;
+	case BEZIER:  bezier.UpdatePoint(cX, cY, bezier.selectedPointIndex);  break;
+	case LAGRANGE:  lagrange.UpdatePoint(cX, cY, lagrange.selectedPointIndex); break;
+	case CATMULLROM:  catmullrom.UpdatePoint(cX, cY, catmullrom.selectedPointIndex); break;
 	case NONE: break;
 	}
 	glutPostRedisplay();     // redraw
-
 }
 
 // Idle event indicating that some time elapsed: do animation here
 void onIdle() {
 	long time = glutGet(GLUT_ELAPSED_TIME); // elapsed time since the start of the program
-	float sec = time / 1000.0f;				// convert msec to sec
-
 }
