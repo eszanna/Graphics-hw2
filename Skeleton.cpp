@@ -146,35 +146,7 @@ public:
 		vec4 mVertex = vec4(cX, cY, 0, 1) * camera.Pinv() * camera.Vinv() * Minv();
 		controlPoints[index] = vec3(mVertex.x, mVertex.y, 0.0f);
 	}
-};
-
-//this algorithm is from the ppt 
-class Lagrange : public Curve {
-public:
-
-	float L(int i, float t) {
-		float Li = 1.0f;
-		for (unsigned int j = 0; j < controlPoints.size(); j++) {
-			if (j != i)
-				Li *= (t - ts[j]) / (ts[i] - ts[j]);
-		}
-		return Li;
-	}
-
-	void AddPoint(float cX, float cY) override {
-		Curve::AddPoint(cX, cY);
-		float ti = (float)(ts.size() + 1) / (ts.size()+2);
-		printf("%f",ti);
-		ts.push_back(ti);
-	}
-
-	vec3 r(float t) {
-		vec3 rt(0, 0, 0);
-		for (unsigned int i = 0; i < controlPoints.size(); i++) {
-			rt = rt + controlPoints[i] * L(i, t);
-		}
-		return rt;
-	}
+	//this spline draws itself a bit differently 
 	void Draw() {
 		if (controlPoints.size() > 0) {
 			vertexData.clear();
@@ -182,7 +154,7 @@ public:
 			int numSections = 100;
 			for (unsigned int i = 0; i < controlPoints.size() - 1; i++) {
 				for (unsigned int j = 0; j <= numSections; j++) {
-					float t = ts[i] + (ts[i + 1] - ts[i]) * ((float)j / numSections);
+					float t = ts[i] + (ts[i + 1] - ts[i]) * ((float)j / numSections); //evenly spaced between the two control points
 					vec3 point = r(t);
 					vertexData.push_back(point.x);
 					vertexData.push_back(point.y);
@@ -218,7 +190,38 @@ public:
 			glDrawArrays(GL_POINTS, (controlPoints.size() - 1) * (numSections + 1), controlPoints.size());
 		}
 	}
-	
+};
+
+//this algorithm is from the ppt 
+class Lagrange : public Curve {
+public:
+
+	float L(int i, float t) {
+		float Li = 1.0f;
+		for (unsigned int j = 0; j < controlPoints.size(); j++) {
+			if (j != i)
+				Li *= (t - ts[j]) / (ts[i] - ts[j]);
+		}
+		return Li;
+	}
+
+	void AddPoint(float cX, float cY) override {
+		Curve::AddPoint(cX, cY);
+		float ti = (float)(ts.size()) / (ts.size() + 1);
+		printf("%f",ti);
+		ts.push_back(ti);
+	}
+
+	vec3 r(float t) {
+		vec3 rt(0, 0, 0);
+		for (unsigned int i = 0; i < controlPoints.size(); i++) {
+			rt = rt + controlPoints[i] * L(i, t);
+		}
+		return rt;
+	}
+	void Draw() {
+		Curve::Draw();
+	}
 };
 
 //this algorithm is from the ppt 
@@ -287,7 +290,7 @@ public:
 class CatmullRom : public Curve {
 
 public:
-	float tension = 0.0f; // parameterization factor
+	float tension = 0.0f;
 
 	vec3 Hermite(vec3 p0, vec3 v0, float t0, vec3 p1, vec3 v1, float t1, float t) {
 		vec3 a0 = p0;
@@ -303,8 +306,13 @@ public:
 				vec3 v1; vec3 v0;
 				if (i > 0)
 					v0 = (1.0f - tension) * 0.5f * ((controlPoints[i + 1] - controlPoints[i]) / (ts[i + 1] - ts[i]) + (controlPoints[i] - controlPoints[i - 1]) / (ts[i] - ts[i - 1]));
+				else
+					v0 = (1.0f - tension) * 0.5f * (controlPoints[i + 1] - controlPoints[i]) / (ts[i + 1] - ts[i]);
+
 				if (i < controlPoints.size() - 2) 
 					v1 = (1.0f - tension) * 0.5f * ((controlPoints[i + 2] - controlPoints[i+1 ]) / (ts[i +2] - ts[i+1]) + (controlPoints[i+1] - controlPoints[i]) / (ts[i +1] - ts[i ]));
+				else 
+					v1 = (1.0f - tension) * 0.5f * (controlPoints[i + 1] - controlPoints[i]) / (ts[i + 1] - ts[i]);
 				
 				return Hermite(controlPoints[i], v0, ts[i], controlPoints[i + 1], v1, ts[i + 1], t);
 			}
@@ -315,71 +323,19 @@ public:
 	void AddPoint(float cX, float cY) override {
 		Curve::AddPoint(cX, cY);
 		if (controlPoints.size() == 1) {
-			//the first control point
+			//the first knot is 0
 			ts.push_back(0);
 		}
 
 		else {
-			//for the rest of the control points, calculate the parameter value based on the distance to the previous point
+			//for the rest of the knots, calculate the parameter value based on the distance to the previous
 			vec3 diff = controlPoints.back() - controlPoints[controlPoints.size() - 2];
 			float dist = sqrt(diff.x * diff.x + diff.y * diff.y);
 			ts.push_back(pow(dist, tension) + ts.back());
 		}
 	}
-	void NormalizeKnots() {
-		if (!ts.empty()) {
-			float maxT = ts.back();
-			for (float& t : ts) {
-				t /= maxT;
-			}
-		}
-	}
+	
 
-	//this spline draws itself a bit differently 
-	void Draw() {
-		if (controlPoints.size() > 0) {
-			vertexData.clear();
-			// generate the curve points
-			int numSections = 100;
-			for (unsigned int i = 0; i < controlPoints.size() - 1; i++) {
-				for (unsigned int j = 0; j <= numSections; j++) {
-					float t = ts[i] + (ts[i + 1] - ts[i]) * ((float)j / numSections);
-					
-					vec3 point = r(t);
-					vertexData.push_back(point.x);
-					vertexData.push_back(point.y);
-					vertexData.push_back(1); // red
-					vertexData.push_back(1); // green
-					vertexData.push_back(0); // blue
-				}
-			}
-
-			// add control points to vertex data
-			for (auto& point : controlPoints) {
-				vertexData.push_back(point.x);
-				vertexData.push_back(point.y);
-				vertexData.push_back(1); // red
-				vertexData.push_back(0); // green
-				vertexData.push_back(0); // blue
-			}
-			// copy data to the GPU
-			glBindBuffer(GL_ARRAY_BUFFER, vbo);
-			glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(float), &vertexData[0], GL_DYNAMIC_DRAW);
-
-			// set GPU uniform matrix variable MVP with the content of CPU variable MVPTransform
-			mat4 MVPTransform = M() * camera.V() * camera.P();
-			gpuProgram.setUniform(MVPTransform, "MVP");
-
-			// draw the curve
-			glBindVertexArray(vao);
-			glLineWidth(2.0f);
-			glDrawArrays(GL_LINE_STRIP, 0, (controlPoints.size() - 1) * (numSections + 1));
-
-			// draw the control points
-			glPointSize(10.0f);
-			glDrawArrays(GL_POINTS, (controlPoints.size() - 1) * (numSections + 1), controlPoints.size());
-		}
-	}
 	void Recalculate() {
 		//clear the ts vector
 		ts.clear();
@@ -389,17 +345,22 @@ public:
 			for (unsigned int i = 1; i < controlPoints.size(); i++) {
 				vec3 diff = controlPoints[i] - controlPoints[i - 1];
 				float dist = sqrt(diff.x * diff.x + diff.y * diff.y);
-				ts.push_back(ts.back() + pow(dist, tension));
+				ts.push_back(pow(dist, tension) + ts.back());
 			}
 		}
 		//redraw the curve
 		Draw();
+		printf("Tension is now: %f\n", tension);
 	}
 
 	//when we press a key to begin to draw a new curve
 	void Clear() {
 		Curve::Clear();
 		tension = 0.0f;
+	}
+
+	void Draw() {
+		Curve::Draw();
 	}
 };
 
